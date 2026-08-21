@@ -8,7 +8,7 @@
 #
 # THE ENV FILE LIVES OUTSIDE THE WORKSPACE
 # ----------------------------------------
-# The deploy reads /var/www/public/fdserp/.env.master on the runner host, not
+# The deploy reads /var/www/public/erpnext/.env.master on the runner host, not
 # deploy/.env from the checkout. That is not a preference: actions/checkout runs
 # `git clean -ffdx`, which deletes ignored files too, so a `deploy/.env` in the
 # workspace would be wiped on the first deploy and every one after. The master
@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, erpnext-prod]
+    runs-on: [self-hosted, Linux, X64, live]
     timeout-minutes: 60
 
     env:
@@ -50,7 +50,7 @@ jobs:
       # compose files". The project name comes from docker-compose.prod.yml
       # itself (`name: erpnext-prod`), so the stack is targeted correctly no
       # matter what directory the runner works in.
-      ENV_FILE: ${{ vars.DEPLOY_ENV_FILE || '/var/www/public/fdserp/.env.master' }}
+      ENV_FILE: ${{ vars.DEPLOY_ENV_FILE || '/var/www/public/erpnext/.env.master' }}
       IMAGE_NAME: erpnext-salesforce
       IMAGE: erpnext-salesforce:${{ github.sha }}
 
