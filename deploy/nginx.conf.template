@@ -19,7 +19,7 @@ map $http_x_forwarded_proto $proxy_x_forwarded_proto {
 }
 
 server {
-    listen 8080;
+    listen 7080;
     server_name ${SITE_NAME};
     absolute_redirect off;
     root /home/frappe/frappe-bench/sites;

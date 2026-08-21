@@ -197,13 +197,17 @@ services:
       PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
       # nginx only serves files and proxies; it needs no database or redis.
       SKIP_WAITS: "1"
+    # Left side is the host port and is the only half that can clash with
+    # anything else on the box - change HTTP_PORT, not the right side. The right
+    # side is inside the container's own network namespace and matches
+    # `listen 7080` in nginx.conf.template.
     ports:
-      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTP_PORT:-7080}:7080"
     depends_on:
       - backend
       - websocket
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:7080/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5

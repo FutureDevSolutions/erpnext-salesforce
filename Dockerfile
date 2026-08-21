@@ -216,7 +216,7 @@ USER frappe
 # the (linked) assets; logs is written by every role.
 VOLUME ["/home/frappe/frappe-bench/sites", "/home/frappe/frappe-bench/logs"]
 
-EXPOSE 8000 9000 8080
+EXPOSE 8000 9000 7080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["gunicorn"]
