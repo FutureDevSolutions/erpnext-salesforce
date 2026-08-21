@@ -1,0 +1,150 @@
+# Production stack. MariaDB and Redis are external/managed - point the .env at
+# them. Every service runs the same image; the argument to the entrypoint picks
+# the role.
+#
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d
+#
+# Run from the repository root: the build context is the repo.
+
+name: erpnext-prod
+
+x-app: &app
+  image: ${IMAGE:-erpnext-salesforce:latest}
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment:
+    DB_HOST: ${DB_HOST}
+    DB_PORT: ${DB_PORT:-3306}
+    REDIS_CACHE: ${REDIS_CACHE}
+    REDIS_QUEUE: ${REDIS_QUEUE}
+    SITE_NAME: ${SITE_NAME}
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    MAIL_SERVER: ${MAIL_SERVER:-}
+    MAIL_PORT: ${MAIL_PORT:-587}
+    MAIL_LOGIN: ${MAIL_LOGIN:-}
+    MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+    MAIL_FROM: ${MAIL_FROM:-}
+    MAIL_USE_TLS: ${MAIL_USE_TLS:-1}
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+services:
+  # Runs once per `up`, then exits. Creates the site on first boot and runs
+  # `bench migrate` on every deploy after that. Everything else waits for it,
+  # so no app container ever serves a half-migrated schema.
+  create-site:
+    <<: *app
+    restart: "no"
+    command: ["/usr/local/bin/create-site.sh"]
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-3306}
+      REDIS_CACHE: ${REDIS_CACHE}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SITE_NAME: ${SITE_NAME}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # Only this one-shot job needs root credentials; they are deliberately
+      # absent from the long-lived services.
+      DB_ROOT_USER: ${DB_ROOT_USER:-root}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+
+  backend:
+    <<: *app
+    command: ["gunicorn"]
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-3306}
+      REDIS_CACHE: ${REDIS_CACHE}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SITE_NAME: ${SITE_NAME}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      MAIL_SERVER: ${MAIL_SERVER:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_LOGIN: ${MAIL_LOGIN:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_USE_TLS: ${MAIL_USE_TLS:-1}
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  websocket:
+    <<: *app
+    command: ["websocket"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  # short + default carry interactive work (emails, notifications, submits).
+  # Kept separate from long so a slow report cannot starve them.
+  queue-short:
+    <<: *app
+    command: ["worker"]
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-3306}
+      REDIS_CACHE: ${REDIS_CACHE}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SITE_NAME: ${SITE_NAME}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      WORKER_QUEUES: short,default
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  queue-long:
+    <<: *app
+    command: ["worker"]
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-3306}
+      REDIS_CACHE: ${REDIS_CACHE}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SITE_NAME: ${SITE_NAME}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      WORKER_QUEUES: long
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  # Exactly one replica. Two schedulers enqueue every cron job twice.
+  scheduler:
+    <<: *app
+    command: ["scheduler"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *app
+    command: ["nginx"]
+    environment:
+      SITE_NAME: ${SITE_NAME}
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
+      # nginx only serves files and proxies; it needs no database or redis.
+      SKIP_WAITS: "1"
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      - backend
+      - websocket
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  sites:
+  logs:

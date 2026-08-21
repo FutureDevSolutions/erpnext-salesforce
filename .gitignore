@@ -20,6 +20,9 @@ node_modules/
 # Aider AI Chat
 .aider*
 
+# Production deployment secrets (see deploy/.env.example)
+deploy/.env
+
 # Banking SPA
 erpnext/public/banking
 erpnext/www/banking.html

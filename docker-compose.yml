@@ -1,0 +1,57 @@
+name: erpnext-dev
+
+services:
+  mariadb:
+    image: docker.io/mariadb:11.8
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD: "123"
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis-cache:
+    image: docker.io/redis:alpine
+
+  redis-queue:
+    image: docker.io/redis:alpine
+
+  frappe:
+    image: docker.io/frappe/bench:latest
+    # Runs the dev bench (web + socketio + esbuild watcher + worker + scheduler).
+    # For a shell instead: docker compose exec frappe bash
+    command: bash -lc "cd /workspace/frappe-bench && exec bench start"
+    # Reap zombies left behind by honcho's children.
+    init: true
+    restart: unless-stopped
+    environment:
+      SHELL: /bin/bash
+    working_dir: /workspace
+    ports:
+      # bench serve (web)
+      - "8000:8000"
+      # socketio
+      - "9000:9000"
+      # esbuild live-reload
+      - "6787:6787"
+    volumes:
+      # The bench itself (venv, node_modules, sites) lives in a named volume:
+      # much faster than a macOS bind mount.
+      - bench:/workspace
+      # ...but the erpnext app is bind-mounted from the host repo so edits are live.
+      - /Users/smusmanzia/Documents/FreeProjs/erpnext-salesforce:/workspace/frappe-bench/apps/erpnext:cached
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+volumes:
+  mariadb-data:
+  bench:

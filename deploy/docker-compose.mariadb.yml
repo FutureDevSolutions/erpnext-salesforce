@@ -1,0 +1,65 @@
+# Optional overlay: a MariaDB this stack manages itself.
+#
+# preflight-db.sh includes this file only when it could not reach a usable
+# database at DB_HOST:DB_PORT. If you are pointing at a managed instance, this
+# file is never used.
+#
+#   docker compose -f deploy/docker-compose.prod.yml \
+#                  -f deploy/docker-compose.mariadb.yml \
+#                  --env-file deploy/.env up -d
+#
+# The server listens on DB_PORT rather than 3306 and publishes the same number
+# on the host, so DB_HOST:DB_PORT means one thing whether you are inside the
+# compose network or at a shell on the host.
+
+services:
+  mariadb:
+    image: docker.io/mariadb:11.8
+    restart: unless-stopped
+    command:
+      - --port=${DB_PORT:-3306}
+      # --- Required by Frappe. Site creation fails without these three. ---
+      # Frappe stores 4-byte UTF-8 (emoji, CJK) and indexes long varchars.
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # Forces utf8mb4 even when a client announces something narrower, which
+      # older MySQL client libraries still do.
+      - --skip-character-set-client-handshake
+      # --- Recommended ---
+      # Frappe creates a table per DocType; per-table files keep them
+      # individually reclaimable and make DYNAMIC row format the default,
+      # which is what allows its long indexes.
+      - --innodb-file-per-table=1
+      # Large fixtures and backup restores exceed the 16M default.
+      - --max-allowed-packet=256M
+      # The single most important performance knob: InnoDB's page cache.
+      # Rule of thumb is ~70% of RAM dedicated to the database.
+      - --innodb-buffer-pool-size=${DB_BUFFER_POOL_SIZE:-1G}
+      # Durability: flush to disk on every commit. Lower it only if you can
+      # afford to lose the last second of transactions.
+      - --innodb-flush-log-at-trx-commit=1
+      - --innodb-flush-method=O_DIRECT
+      # Each gunicorn thread and each background worker holds a connection.
+      - --max-connections=${DB_MAX_CONNECTIONS:-200}
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_AUTO_UPGRADE: "1"
+    ports:
+      - "${DB_PORT:-3306}:${DB_PORT:-3306}"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test:
+        ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+volumes:
+  mariadb-data:
+    # Named explicitly so a fallback instance on another port gets its OWN
+    # storage. Reusing one volume would re-initialise nothing - MariaDB keeps
+    # the root password from first init - so a second instance would reject the
+    # same credentials the first one did.
+    name: ${DB_VOLUME_NAME:-erpnext-mariadb-data}

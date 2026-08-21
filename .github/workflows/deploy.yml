@@ -1,0 +1,197 @@
+# Build this branch into an image and swap the running stack over to it.
+#
+# RUNNER
+# ------
+# Runs on a self-hosted runner installed on the box that hosts the containers,
+# so there is no registry and no SSH hop: the workflow builds and deploys in
+# place. Give that runner the `erpnext-prod` label.
+#
+# THE ENV FILE LIVES OUTSIDE THE WORKSPACE
+# ----------------------------------------
+# The deploy reads /var/www/public/fdserp/.env.master on the runner host, not
+# deploy/.env from the checkout. That is not a preference: actions/checkout runs
+# `git clean -ffdx`, which deletes ignored files too, so a `deploy/.env` in the
+# workspace would be wiped on the first deploy and every one after. The master
+# file is also the copy preflight-db.sh rewrites, so it stays the single source
+# of truth across deploys. Override the path with a DEPLOY_ENV_FILE repo
+# variable if it ever moves; keep it chmod 600 and owned by the runner user.
+#
+# WHY `compose up` AND NOT `docker stop` + `docker rm` + `docker run`
+# ------------------------------------------------------------------
+# `up -d` already stops, removes and recreates exactly the services whose image
+# changed, and it honours the dependency graph. That graph is load-bearing here:
+# the one-shot `create-site` service runs `bench migrate`, and all six other
+# services gate on it via `service_completed_successfully`. Tearing containers
+# down by hand throws that ordering away and can serve a half-migrated schema.
+
+name: Deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# Never cancel a deploy in flight - it could be mid-migration.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, erpnext-prod]
+    timeout-minutes: 60
+
+    env:
+      # The compose file set is resolved at run time rather than pinned here,
+      # because the self-managed MariaDB overlay is conditional - see "Resolve
+      # compose files". The project name comes from docker-compose.prod.yml
+      # itself (`name: erpnext-prod`), so the stack is targeted correctly no
+      # matter what directory the runner works in.
+      ENV_FILE: ${{ vars.DEPLOY_ENV_FILE || '/var/www/public/fdserp/.env.master' }}
+      IMAGE_NAME: erpnext-salesforce
+      IMAGE: erpnext-salesforce:${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check env file is present
+        run: |
+          if [ ! -r "$ENV_FILE" ]; then
+            echo "::error::No readable env file at $ENV_FILE."
+            echo "Seed it once, from a filled-in copy of deploy/.env.example:"
+            echo "  sudo install -D -m 600 -o \"\$(id -un)\" deploy/.env $ENV_FILE"
+            exit 1
+          fi
+
+      # Probe DB_HOST:DB_PORT from inside Docker - the containers' view, not the
+      # runner's - and act on what comes back:
+      #   nothing listening            -> create a MariaDB with these credentials
+      #   answers, credentials work    -> leave it alone
+      #   answers, credentials refused -> leave that database strictly alone and
+      #                                   create a separate one on the next free
+      #                                   port, rewriting DB_PORT in $ENV_FILE
+      #
+      # This MUST run before "Resolve compose files". Provisioning rewrites
+      # DB_HOST/DB_PORT/DB_VOLUME_NAME in $ENV_FILE, and that next step reads
+      # DB_HOST to decide whether the overlay is in play. Run it after, and the
+      # first deploy that provisions a database would omit the overlay and then
+      # have --remove-orphans delete the database it just created.
+      #
+      # Set a DB_NO_PROVISION repo variable to 1 to fail instead of creating
+      # anything. Do that once you are on a managed instance: there an
+      # unreachable database is an outage to page on, not something to paper
+      # over with a fresh empty server that would then get a brand new site.
+      - name: Database preflight
+        # Passed through env rather than interpolated into the script body:
+        # ${{ }} expands before the shell sees it, so a value containing shell
+        # metacharacters would execute. Harmless for an admin-set repo variable,
+        # but this is the habit that stops the same pattern being unsafe when it
+        # is applied to event data later.
+        env:
+          DB_NO_PROVISION: ${{ vars.DB_NO_PROVISION }}
+        run: |
+          args=""
+          if [ "$DB_NO_PROVISION" = "1" ]; then
+            args="--no-provision"
+          fi
+          bash deploy/preflight-db.sh --env-file "$ENV_FILE" $args
+
+      # preflight-db.sh can repoint DB_HOST at a MariaDB this stack manages
+      # itself (the docker-compose.mariadb.yml overlay). Whenever it has, that
+      # overlay MUST be loaded here too: the overlay shares the erpnext-prod
+      # project, so without it `up --remove-orphans` sees the mariadb container
+      # as belonging to no known service and deletes it - taking the database
+      # down in the middle of a deploy. Mirror preflight's own rule: DB_HOST
+      # resolving to `mariadb` means the overlay is in play.
+      #
+      # Read with grep rather than `source`: sourcing executes the file, and a
+      # password containing $(...) or backticks would run as code.
+      - name: Resolve compose files
+        run: |
+          db_host="$(grep -E '^[[:space:]]*DB_HOST=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+          db_host="${db_host%\"}"; db_host="${db_host#\"}"
+          db_host="${db_host%\'}"; db_host="${db_host#\'}"
+          db_host="$(printf '%s' "$db_host" | tr -d '[:space:]')"
+
+          args="-f deploy/docker-compose.prod.yml"
+          if [ "$db_host" = "mariadb" ]; then
+            args="$args -f deploy/docker-compose.mariadb.yml"
+            echo "DB_HOST=mariadb -> including the self-managed MariaDB overlay"
+          else
+            echo "DB_HOST=${db_host:-<unset>} -> external database, overlay not loaded"
+          fi
+          echo "COMPOSE_ARGS=$args" >> "$GITHUB_ENV"
+
+      # FRAPPE_BRANCH defaults to `develop` in the Dockerfile, which is a moving
+      # target - two builds a week apart are not the same image. Set a repo
+      # variable FRAPPE_REF to a tag or SHA to make builds reproducible.
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg FRAPPE_BRANCH="${{ vars.FRAPPE_REF || 'develop' }}" \
+            -t "$IMAGE" \
+            -t "${IMAGE_NAME}:latest" \
+            .
+
+      # Recreates create-site (which migrates), then backend, websocket, the two
+      # workers, scheduler and frontend. --remove-orphans clears containers from
+      # services that no longer exist in the compose file.
+      #
+      # $COMPOSE_ARGS is deliberately unquoted here and below: it holds several
+      # words (`-f a -f b`) that must split into separate arguments.
+      - name: Swap the stack over
+        run: docker compose $COMPOSE_ARGS --env-file "$ENV_FILE" up -d --remove-orphans
+
+      # `up -d` returns as soon as the containers are created, so it is not
+      # proof the app serves traffic. Poll the healthcheck the compose file
+      # already defines on `frontend` (GET /healthz through nginx).
+      #
+      # Deliberately not `up --wait`: create-site is *meant* to exit, and
+      # --wait treats an exited one-shot service as a failure on some compose
+      # versions.
+      - name: Wait for frontend to report healthy
+        run: |
+          cid="$(docker compose $COMPOSE_ARGS --env-file "$ENV_FILE" ps -q frontend)"
+          if [ -z "$cid" ]; then echo "::error::frontend container not created"; exit 1; fi
+
+          for _ in $(seq 1 60); do
+            status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
+            case "$status" in
+              healthy) echo "frontend healthy"; exit 0 ;;
+              unhealthy) echo "::error::frontend reported unhealthy"; exit 1 ;;
+            esac
+            sleep 3
+          done
+
+          echo "::error::frontend did not become healthy within 180s"
+          exit 1
+
+      - name: Show what is running
+        run: docker compose $COMPOSE_ARGS --env-file "$ENV_FILE" ps
+
+      # Migrations fail here more often than anything else, and the reason is
+      # only ever in the one-shot job's log.
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "===== create-site (migrations) ====="
+          docker compose $COMPOSE_ARGS --env-file "$ENV_FILE" logs --no-color --tail=200 create-site || true
+          echo "===== backend ====="
+          docker compose $COMPOSE_ARGS --env-file "$ENV_FILE" logs --no-color --tail=100 backend || true
+          echo "===== frontend ====="
+          docker compose $COMPOSE_ARGS --env-file "$ENV_FILE" logs --no-color --tail=50 frontend || true
+
+      # Every build is tagged with its SHA, so old builds are never dangling and
+      # would otherwise pile up at ~2GB each. Keep the three most recent; `rmi`
+      # refuses to touch an image a container is still using, hence `|| true`.
+      - name: Prune old images
+        if: always()
+        run: |
+          docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' "$IMAGE_NAME" \
+            | grep -v ':latest ' \
+            | awk 'NR>3 {print $2}' \
+            | xargs -r docker rmi || true
+          docker image prune -f
