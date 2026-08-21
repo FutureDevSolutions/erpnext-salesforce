@@ -1,7 +1,9 @@
 # Production deployment
 
 Builds this fork into a single container image and runs it as a full ERPNext
-stack against **external, managed MariaDB and Redis**.
+stack. **MariaDB is external** — managed, or provisioned for you by the
+preflight. **Redis runs inside the stack**, so there is nothing to configure and
+nothing bound on the host.
 
 ## Quick start
 
@@ -78,7 +80,7 @@ Fill these into `deploy/.env`; the rest have working defaults.
 | `SITE_NAME` | Must equal the domain users browse to. Frappe routes on it. |
 | `DB_HOST` | Managed MariaDB 10.6+, configured for utf8mb4. Leave empty to have one provisioned for you. |
 | `DB_ROOT_PASSWORD` | Creates the site's own DB and user — and the server itself, if the preflight provisions one. |
-| `REDIS_CACHE`, `REDIS_QUEUE` | Two logical instances, or one server with different DB indexes. |
+| `REDIS_CACHE`, `REDIS_QUEUE` | Nothing to do — they default to the stack's own Redis services. |
 | `ADMIN_PASSWORD` | Initial Administrator password. |
 | `ENCRYPTION_KEY` | `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | SMTP (optional) | `MAIL_SERVER`, `MAIL_PORT`, `MAIL_LOGIN`, `MAIL_PASSWORD`, `MAIL_FROM` |
@@ -94,11 +96,14 @@ skip-character-set-client-handshake
 
 ## Architecture
 
-One image, six roles. The role is the container's command.
+Two Redis services, plus one image running six roles — the role is the
+container's command.
 
 | Service | Command | Notes |
 |---|---|---|
-| `create-site` | `create-site.sh` | One-shot. Creates the site, then `bench migrate` on later deploys. Everything waits on it. |
+| `redis-cache` | — | `redis:7-alpine`. No volume, no snapshots, `allkeys-lru` at `REDIS_CACHE_MAXMEMORY`. Evicting cache is free. |
+| `redis-queue` | — | `redis:7-alpine`. Volume + `appendonly`, and deliberately **no** eviction policy — dropping a queued job loses work silently. |
+| `create-site` | `create-site.sh` | One-shot. Creates the site, then `bench migrate` on later deploys. Gates on both Redis services being healthy; everything else waits on it. |
 | `backend` | `gunicorn` | WSGI, gthread workers. |
 | `websocket` | `websocket` | `node apps/frappe/socketio.js`. |
 | `queue-short` | `worker` | `short,default` queues — interactive work. |

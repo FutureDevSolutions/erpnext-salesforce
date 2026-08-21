@@ -1,6 +1,7 @@
-# Production stack. MariaDB and Redis are external/managed - point the .env at
-# them. Every service runs the same image; the argument to the entrypoint picks
-# the role.
+# Production stack. MariaDB is external - point the .env at it, or let
+# preflight-db.sh provision one via the docker-compose.mariadb.yml overlay.
+# Redis runs here, in the stack. Every app service runs the same image; the
+# argument to the entrypoint picks the role.
 #
 #   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d
 #
@@ -32,6 +33,61 @@ x-app: &app
     - logs:/home/frappe/frappe-bench/logs
 
 services:
+  # ------------------------------------------------------------------- redis
+  # In-stack rather than on the host. A Redis running natively on the host is
+  # NOT reachable from these containers as 127.0.0.1 - inside a container that
+  # address is the container's own loopback - and exposing the host's instance
+  # on a LAN address to reach it would mean binding it outside localhost. Here
+  # neither service publishes a port at all: they are reachable only from this
+  # compose network.
+  #
+  # Two instances rather than two DB indexes on one, because the two have
+  # opposite requirements and maxmemory-policy is server-wide: the cache must be
+  # free to evict under pressure, and the queue must never drop a key. Sharing
+  # one instance lets cache eviction silently delete queued jobs.
+  redis-cache:
+    image: docker.io/redis:7-alpine
+    restart: unless-stopped
+    # `--save ""` disables RDB snapshots: this is a cache, and rebuilding it is
+    # cheaper than writing it to disk. It evicts (allkeys-lru) instead of OOMing.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - ${REDIS_CACHE_MAXMEMORY:-512mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  redis-queue:
+    image: docker.io/redis:7-alpine
+    restart: unless-stopped
+    # appendonly so pending background jobs survive a restart. Deliberately no
+    # maxmemory and no eviction policy - evicting a queued job loses work with
+    # no error anywhere.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
   # Runs once per `up`, then exits. Creates the site on first boot and runs
   # `bench migrate` on every deploy after that. Everything else waits for it,
   # so no app container ever serves a half-migrated schema.
@@ -51,6 +107,14 @@ services:
       DB_ROOT_USER: ${DB_ROOT_USER:-root}
       DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    # Only declared here. Every other service already gates on create-site, and
+    # compose resolves the graph transitively, so redis is up and healthy before
+    # anything touches it.
+    depends_on:
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
 
   backend:
     <<: *app
@@ -148,3 +212,5 @@ services:
 volumes:
   sites:
   logs:
+  # Only the queue is persisted. The cache is deliberately volumeless.
+  redis-queue-data:
