@@ -1,11 +1,5 @@
 # Build this branch into an image and swap the running stack over to it.
 #
-# RUNNER
-# ------
-# Runs on a self-hosted runner installed on the box that hosts the containers,
-# so there is no registry and no SSH hop: the workflow builds and deploys in
-# place. Give that runner the `erpnext-prod` label.
-#
 # THE ENV FILE LIVES OUTSIDE THE WORKSPACE
 # ----------------------------------------
 # The deploy reads /var/www/public/erpnext/.env.master on the runner host, not
