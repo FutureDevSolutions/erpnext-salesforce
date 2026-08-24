@@ -26,3 +26,4 @@ deploy/.env
 # Banking SPA
 erpnext/public/banking
 erpnext/www/banking.html
+config.bat

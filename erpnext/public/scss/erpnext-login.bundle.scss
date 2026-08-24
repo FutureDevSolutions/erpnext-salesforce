@@ -1,0 +1,248 @@
+// FDS ERP sign-in page.
+//
+// Loaded ONLY on /login (see erpnext/utilities/website_context.py), so no other
+// portal page pays for it.
+//
+// Nothing here modifies frappe's markup. The layout hangs off .erp-login-grid,
+// a class the companion script adds at runtime to the (unclassed) <div> that
+// wraps login.html's five <section>s. That means upstream edits to login.html
+// land without conflict, and if the script never runs the page renders exactly
+// as frappe ships it.
+//
+// Brand colours are sampled from erpnext/public/images/fds-erp-logo.png:
+//   #22323C  slate  - the logo's own background, so the panel and the mark blend
+//   #17D492  mint   - the logo's accent
+//   #F5F5F5  paper  - the logo's wordmark
+
+$fds-slate: #22323c;
+$fds-mint: #17d492;
+$fds-paper: #f5f5f5;
+
+// Below this the diagram is dropped entirely and only the form remains.
+$fds-split-at: 1024px;
+
+body[data-path="login"] {
+	--fds-slate: #{$fds-slate};
+	--fds-mint: #{$fds-mint};
+	--fds-paper: #{$fds-paper};
+
+	// The five sign-in states (login / signup / forgot / email-link /
+	// email-login) are stacked in a single grid cell; frappe's login.js shows
+	// one at a time, so they never fight for space.
+	.erp-login-grid {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.erp-orbit {
+		display: none;
+	}
+
+	@media (min-width: $fds-split-at) {
+		.erp-login-grid {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			align-items: center;
+			min-height: 100vh;
+		}
+
+		// Every form state shares column 2, row 1.
+		.erp-login-grid > section,
+		.erp-login-grid > noscript {
+			grid-column: 2;
+			grid-row: 1;
+			justify-self: center;
+			width: 100%;
+			max-width: 26rem;
+			padding: 2rem;
+		}
+
+		// order:-1 puts the diagram on the left visually while it stays LAST in
+		// the DOM - so keyboard and screen-reader users reach the sign-in form
+		// first and never have to tab through decoration to log in.
+		.erp-orbit {
+			display: flex;
+			order: -1;
+			grid-column: 1;
+			grid-row: 1;
+			position: relative;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 1.5rem;
+			align-self: stretch;
+			padding: 3rem 2rem;
+			overflow: hidden;
+			background:
+				radial-gradient(
+					circle at 50% 42%,
+					rgba(23, 212, 146, 0.16) 0%,
+					rgba(23, 212, 146, 0) 62%
+				),
+				var(--fds-slate);
+		}
+	}
+
+	.erp-orbit__logo {
+		width: clamp(8rem, 12vw, 11rem);
+		height: auto;
+		// The PNG's own background is exactly --fds-slate, so on this panel the
+		// tile edge is invisible and the mark reads as if it were cut out.
+		border-radius: 0.75rem;
+	}
+
+	.erp-orbit__svg {
+		width: min(100%, 34rem);
+		height: auto;
+		overflow: visible;
+	}
+
+	.erp-orbit__ring {
+		fill: none;
+		stroke: rgba(245, 245, 245, 0.13);
+		stroke-width: 1;
+	}
+
+	.erp-orbit__core-glow {
+		fill: var(--fds-mint);
+		opacity: 0.13;
+	}
+
+	.erp-orbit__core-node {
+		fill: var(--fds-mint);
+	}
+
+	.erp-orbit__core-link {
+		stroke: var(--fds-mint);
+		stroke-width: 3;
+		stroke-linecap: round;
+	}
+
+	// One <g> per ring. transform-origin 0 0 works because the script nests
+	// these inside a <g transform="translate(cx,cy)">, so local 0,0 is centre.
+	.erp-orbit__spin,
+	.erp-orbit__counter {
+		transform-origin: 0 0;
+		animation: erp-orbit-spin var(--erp-dur, 60s) linear infinite;
+		will-change: transform;
+	}
+
+	// Cancels the ring's rotation so labels stay upright as they travel.
+	.erp-orbit__counter {
+		animation-direction: reverse;
+	}
+
+	.erp-orbit__node {
+		cursor: default;
+		outline: none;
+	}
+
+	.erp-orbit__dot {
+		fill: var(--fds-slate);
+		stroke: var(--fds-mint);
+		stroke-width: 1.5;
+		transition: fill 0.25s ease, stroke-width 0.25s ease;
+	}
+
+	.erp-orbit__label {
+		fill: var(--fds-paper);
+		font-size: 13px;
+		font-weight: 500;
+		text-anchor: middle;
+		// Labels are painted by the diagram, never selected or clicked.
+		user-select: none;
+		pointer-events: none;
+	}
+
+	.erp-orbit__node-group {
+		transition: opacity 0.25s ease;
+	}
+
+	// --- hover / focus -----------------------------------------------------
+	// The script sets .is-paused on the panel and .is-active on one node, so a
+	// single hover can dim every sibling across all three rings.
+	.erp-orbit.is-paused {
+		.erp-orbit__spin,
+		.erp-orbit__counter {
+			animation-play-state: paused;
+		}
+
+		.erp-orbit__node-group {
+			opacity: 0.35;
+		}
+
+		.erp-orbit__node.is-active .erp-orbit__node-group {
+			opacity: 1;
+		}
+	}
+
+	.erp-orbit__node.is-active {
+		.erp-orbit__dot {
+			fill: var(--fds-mint);
+			stroke-width: 3;
+		}
+
+		.erp-orbit__node-group {
+			transform: scale(1.35);
+		}
+	}
+
+	.erp-orbit__node-group {
+		transform-box: fill-box;
+		transform-origin: center;
+		transition: opacity 0.25s ease, transform 0.25s ease;
+	}
+
+	.erp-orbit__node:focus-visible .erp-orbit__dot {
+		stroke: var(--fds-paper);
+		stroke-width: 3;
+	}
+
+	// --- caption -----------------------------------------------------------
+	// Fixed height so the diagram never shifts as text swaps in and out.
+	.erp-orbit__caption {
+		min-height: 4.5rem;
+		max-width: 22rem;
+		text-align: center;
+		color: rgba(245, 245, 245, 0.72);
+	}
+
+	.erp-orbit__caption-title {
+		margin: 0 0 0.35rem;
+		color: var(--fds-paper);
+		font-size: 1.05rem;
+		font-weight: 600;
+	}
+
+	.erp-orbit__caption-text {
+		margin: 0;
+		font-size: 0.875rem;
+		line-height: 1.5;
+	}
+
+	// --- reduced motion ----------------------------------------------------
+	// Each node's angle is a static SVG transform attribute, so switching the
+	// animation off leaves a correctly distributed, still diagram rather than
+	// collapsing everything onto one spoke.
+	@media (prefers-reduced-motion: reduce) {
+		.erp-orbit__spin,
+		.erp-orbit__counter {
+			animation: none;
+		}
+
+		.erp-orbit__node-group,
+		.erp-orbit__dot {
+			transition: none;
+		}
+	}
+}
+
+@keyframes erp-orbit-spin {
+	from {
+		transform: rotate(0deg);
+	}
+
+	to {
+		transform: rotate(360deg);
+	}
+}

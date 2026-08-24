@@ -121,6 +121,10 @@ website_context = {
 	"splash_image": "/assets/erpnext/images/erpnext-logo.svg",
 }
 
+# Attaches the sign-in page's assets to that route alone. Kept out of the global
+# web_include_css / web_include_js hooks above, which load on every portal page.
+update_website_context = "erpnext.utilities.website_context.add_login_assets"
+
 # nosemgrep
 website_route_rules = [
 	{"from_route": "/orders", "to_route": "Sales Order"},
